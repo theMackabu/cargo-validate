@@ -29,6 +29,8 @@ struct Package {
     license: Option<ColoredString>,
     description: Option<ColoredString>,
     repository: Option<ColoredString>,
+    name_exists: bool,
+    version_exists: bool,
 }
 
 struct ColoredLazy(LazyLock<ColoredString>);
@@ -168,6 +170,8 @@ fn get_package_info() -> io::Result<Package> {
         license,
         description,
         repository,
+        name_exists,
+        version_exists,
     })
 }
 
@@ -222,13 +226,21 @@ fn run(args: Vec<String>) -> io::Result<()> {
         }
     }
 
-    print!("\n{} {}{} ", "Are you sure you want to publish?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+    if pkg.name_exists {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "\nPublish cancelled: name already exists"));
+    } else if pkg.version_exists {
+        print!("\n{} {}{} ", "Are you sure you want to publish an existing version? ".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+    } else if !git_status.is_empty() {
+        print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+    } else {
+        print!("\n{} {}{} ", "Are you sure you want to publish?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+    }
+
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     if !input.trim().eq_ignore_ascii_case("y") {
-        println!("{}", "Publish cancelled.".red().bold());
-        exit(1);
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Publish cancelled."));
     }
 
     println!("{}", "Proceeding with cargo publish...".green().bold());
@@ -236,12 +248,10 @@ fn run(args: Vec<String>) -> io::Result<()> {
     let mut full_command = vec!["publish".to_string()];
     full_command.extend(args);
 
-    let status = Command::new("cargo").args(&full_command).status()?;
-
-    if !status.success() {
-        eprintln!("{}", "Cargo publish failed".red().bold());
-        exit(status.code().unwrap_or(1));
+    if !Command::new("cargo").args(&full_command).status()?.success() {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Cargo publish failed"));
     }
+
     Ok(())
 }
 
