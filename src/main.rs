@@ -226,12 +226,16 @@ fn run(args: Vec<String>) -> io::Result<()> {
         }
     }
 
+    let mut full_command = Vec::from(["publish".to_string()]);
+    full_command.extend(args);
+
     if pkg.name_exists {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "\nPublish cancelled: name already exists"));
     } else if pkg.version_exists {
-        print!("\n{} {}{} ", "Are you sure you want to publish an existing version? ".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+        print!("\n{} {}{} ", "Are you sure you want to publish an existing version?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
     } else if !git_status.is_empty() {
         print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+        full_command.push("--allow-dirty".to_string());
     } else {
         print!("\n{} {}{} ", "Are you sure you want to publish?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
     }
@@ -239,17 +243,15 @@ fn run(args: Vec<String>) -> io::Result<()> {
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
+
     if !input.trim().eq_ignore_ascii_case("y") {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "Publish cancelled."));
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "\nPublish cancelled."));
     }
 
-    println!("{}", "Proceeding with cargo publish...".green().bold());
-
-    let mut full_command = vec!["publish".to_string()];
-    full_command.extend(args);
+    println!("{}", "\nProceeding with cargo publish...".green().bold());
 
     if !Command::new("cargo").args(&full_command).status()?.success() {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "Cargo publish failed"));
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "\nCargo publish failed"));
     }
 
     Ok(())
