@@ -13,16 +13,13 @@ use toml::Value as TomlValue;
 
 #[derive(Parser)]
 #[clap(name = "cargo-validate", bin_name = "cargo")]
-enum Cli {
-    Validate(PushArgs),
-}
-
-#[derive(Parser)]
 #[clap(version, about = "Cargo publish with confirmation")]
-struct PushArgs {
-    /// Arguments to pass to the original cargo publish command
-    #[clap(allow_hyphen_values = true, last = true)]
-    args: Vec<String>,
+enum Cli {
+    Validate {
+        /// Arguments to pass to the original cargo publish command
+        #[clap(last = true)]
+        args: Vec<String>,
+    },
 }
 
 struct Package {
@@ -179,9 +176,7 @@ fn get_git_status() -> io::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn run(cli: Cli) -> io::Result<()> {
-    let Cli::Validate(args) = cli;
-
+fn run(args: Vec<String>) -> io::Result<()> {
     let pkg = get_package_info()?;
 
     println!("{}", "Package Information:".magenta().bold());
@@ -237,11 +232,12 @@ fn run(cli: Cli) -> io::Result<()> {
     }
 
     println!("{}", "Proceeding with cargo publish...".green().bold());
-    let mut publish_command = Command::new("cargo");
-    publish_command.arg("publish");
-    publish_command.args(&args.args);
 
-    let status = publish_command.status()?;
+    let mut full_command = vec!["publish".to_string()];
+    full_command.extend(args);
+
+    let status = Command::new("cargo").args(&full_command).status()?;
+
     if !status.success() {
         eprintln!("{}", "Cargo publish failed".red().bold());
         exit(status.code().unwrap_or(1));
@@ -250,16 +246,16 @@ fn run(cli: Cli) -> io::Result<()> {
 }
 
 fn main() {
-    let mut cli = Cli::command();
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 1 && args[1] == "validate" {
-        let result = Cli::Validate(PushArgs::parse_from(&args[2..]));
-        if let Err(err) = run(result) {
+    if args.len() > 2 && args[1] == "validate" {
+        let publish_args = args[2..].to_vec();
+        if let Err(err) = run(publish_args) {
             eprintln!("{}", err.to_string().red().bold());
             exit(1);
         }
     } else {
-        let _ = cli.print_help();
+        let mut cmd = Cli::command();
+        let _ = cmd.print_help();
     }
 }
