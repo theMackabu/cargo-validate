@@ -16,6 +16,7 @@ cargo validate [-- <cargo publish args>]
 
 Features:
 
-- Shows git status
-- Displays package info
+- Informs of current git status
+- Displays and validates package info
+- Checks current username as owner
 - Checks crate existence on crates.io
