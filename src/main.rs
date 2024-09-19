@@ -2,14 +2,18 @@ use clap::{CommandFactory, Parser};
 use colored::*;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use semver::Version;
 use serde_json::Value;
-use std::fmt;
-use std::fs;
-use std::io::{self, Write};
-use std::ops::Deref;
-use std::process::{exit, Command};
-use std::sync::LazyLock;
 use toml::Value as TomlValue;
+use toml_edit::{DocumentMut, Item};
+
+use std::{
+    fmt, fs,
+    io::{self, Write},
+    ops::Deref,
+    process::{exit, Command},
+    sync::LazyLock,
+};
 
 #[derive(Parser)]
 #[clap(name = "cargo-validate", bin_name = "cargo")]
@@ -29,8 +33,10 @@ struct Package {
     license: Option<ColoredString>,
     description: Option<ColoredString>,
     repository: Option<ColoredString>,
+
     name_exists: bool,
     version_exists: bool,
+    version_raw: String,
 }
 
 struct ColoredLazy(LazyLock<ColoredString>);
@@ -47,6 +53,24 @@ impl fmt::Display for ColoredLazy {
 
 static INVALID: ColoredLazy = ColoredLazy(LazyLock::new(|| "✖".red()));
 static VALID: ColoredLazy = ColoredLazy(LazyLock::new(|| "✔".green()));
+
+fn bump_version(version: &str) -> io::Result<String> {
+    let mut v = Version::parse(version).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    v.patch += 1;
+    Ok(v.to_string())
+}
+
+fn update_version(new_version: &str) -> io::Result<()> {
+    let cargo_toml_content = fs::read_to_string("Cargo.toml")?;
+    let mut doc = cargo_toml_content
+        .parse::<DocumentMut>()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse Cargo.toml: {}", e)))?;
+
+    doc["package"]["version"] = Item::Value(new_version.into());
+
+    fs::write("Cargo.toml", doc.to_string())?;
+    Ok(())
+}
 
 fn get_or_prompt_username() -> io::Result<String> {
     let home_dir = home::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Home directory not found"))?;
@@ -147,6 +171,7 @@ fn get_package_info() -> io::Result<Package> {
 
     let current_username = get_or_prompt_username()?;
     let (crate_exists, version_exists, owners) = check_crate_exists(name, version)?;
+    let version_raw = package.get("version").and_then(|v| v.as_str()).unwrap().to_string();
 
     let name_exists = crate_exists && !owners.contains(&current_username);
     let name = if name_exists { format!("{name} {INVALID}") } else { format!("{name} {VALID}") }.into();
@@ -171,6 +196,7 @@ fn get_package_info() -> io::Result<Package> {
         description,
         repository,
         name_exists,
+        version_raw,
         version_exists,
     })
 }
@@ -181,7 +207,7 @@ fn get_git_status() -> io::Result<String> {
 }
 
 fn run(args: Vec<String>) -> io::Result<()> {
-    let pkg = get_package_info()?;
+    let mut pkg = get_package_info()?;
 
     println!("{}", "Package Information:".magenta().bold());
     println!(" {}: {}", "Name".bright_magenta(), pkg.name);
@@ -214,7 +240,7 @@ fn run(args: Vec<String>) -> io::Result<()> {
         println!("\n{} {}", "Package is missing:".bright_yellow(), missing_fields.join(", ").bright_yellow());
     }
 
-    let git_status = get_git_status()?;
+    let mut git_status = get_git_status()?;
 
     if git_status.is_empty() {
         println!("\n{}", "No uncommitted git changes".bright_green().bold());
@@ -229,10 +255,47 @@ fn run(args: Vec<String>) -> io::Result<()> {
     let mut full_command = Vec::from(["publish".to_string()]);
     full_command.extend(args);
 
+    if pkg.version_exists {
+        print!(
+            "\n{} {}{} ",
+            "Version already exists. Do you want to bump the patch version?".bright_blue().bold(),
+            "(y/n)".bright_cyan(),
+            ":"
+        );
+
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        if input.trim().eq_ignore_ascii_case("y") {
+            let current_version = pkg.version_raw.trim();
+            let new_version = bump_version(&current_version)?;
+
+            println!(
+                "\n{} {} {} {}",
+                "Bumping version from".bright_blue(),
+                current_version.bright_yellow(),
+                "to".bright_blue(),
+                new_version.bright_green()
+            );
+
+            update_version(&new_version)?;
+            println!("{}", "Updated Cargo.toml with new version".green());
+
+            pkg.version = new_version.green();
+
+            full_command.push("--allow-dirty".to_string());
+            git_status = String::default();
+        } else {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Publish cancelled."));
+        }
+    }
+
     if pkg.name_exists {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "\nPublish cancelled: name already exists"));
-    } else if pkg.version_exists {
-        print!("\n{} {}{} ", "Are you sure you want to publish an existing version?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+    } else if !git_status.is_empty() {
+        print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
+        full_command.push("--allow-dirty".to_string());
     } else if !git_status.is_empty() {
         print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
         full_command.push("--allow-dirty".to_string());
@@ -245,13 +308,13 @@ fn run(args: Vec<String>) -> io::Result<()> {
     io::stdin().read_line(&mut input)?;
 
     if !input.trim().eq_ignore_ascii_case("y") {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "\nPublish cancelled."));
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Publish cancelled."));
     }
 
-    println!("{}", "\nProceeding with cargo publish...".green().bold());
+    println!("{}", "Proceeding with cargo publish...".green().bold());
 
     if !Command::new("cargo").args(&full_command).status()?.success() {
-        return Err(io::Error::new(io::ErrorKind::Interrupted, "\nCargo publish failed"));
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Cargo publish failed"));
     }
 
     Ok(())
