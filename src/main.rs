@@ -4,6 +4,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use serde_json::Value;
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
 use std::ops::Deref;
 use std::process::{exit, Command};
@@ -48,23 +49,44 @@ impl fmt::Display for ColoredLazy {
 static INVALID: ColoredLazy = ColoredLazy(LazyLock::new(|| "✖".red()));
 static VALID: ColoredLazy = ColoredLazy(LazyLock::new(|| "✔".green()));
 
-fn check_crate_exists(name: &str, version: &str) -> io::Result<(bool, bool)> {
+fn get_or_prompt_username() -> io::Result<String> {
+    let home_dir = home::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Home directory not found"))?;
+    let username_file = home_dir.join(".cargo").join("username");
+
+    if username_file.exists() {
+        return fs::read_to_string(username_file);
+    }
+
+    print!("Please enter your crates.io username: ");
+    io::stdout().flush()?;
+    let mut username = String::new();
+    io::stdin().read_line(&mut username)?;
+    let username = username.trim().to_string();
+
+    fs::create_dir_all(username_file.parent().unwrap())?;
+    fs::write(&username_file, &username)?;
+
+    Ok(username)
+}
+
+fn check_crate_exists(name: &str, version: &str) -> io::Result<(bool, bool, Vec<String>)> {
     let client = Client::new();
-    let url = format!("https://crates.io/api/v1/crates/{}", name);
+    let crate_url = format!("https://crates.io/api/v1/crates/{}", name);
+    let owners_url = format!("https://crates.io/api/v1/crates/{}/owner_user", name);
 
-    // Create a custom header map
     let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static("cargo-push"));
+    headers.insert(USER_AGENT, HeaderValue::from_static("cargo-validate"));
 
-    let response = client
-        .get(&url)
-        .headers(headers)
+    // Check if crate exists and get version information
+    let crate_response = client
+        .get(&crate_url)
+        .headers(headers.clone())
         .send()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to send request to crates.io API: {}", e)))?;
 
-    match response.status().as_u16() {
+    match crate_response.status().as_u16() {
         200 => {
-            let body: Value = response
+            let body: Value = crate_response
                 .json()
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse API response: {}", e)))?;
 
@@ -74,13 +96,34 @@ fn check_crate_exists(name: &str, version: &str) -> io::Result<(bool, bool)> {
 
             let version_exists = versions.iter().any(|v| v["num"].as_str() == Some(version));
 
-            Ok((true, version_exists))
+            let owners_response = client
+                .get(&owners_url)
+                .headers(headers)
+                .send()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to send request to crates.io API: {}", e)))?;
+
+            if !owners_response.status().is_success() {
+                return Err(io::Error::new(io::ErrorKind::Other, format!("Failed to get crate owners. Status: {}", owners_response.status())));
+            }
+
+            let owners_body: Value = owners_response
+                .json()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("Failed to parse API response: {}", e)))?;
+
+            let owners = owners_body["users"]
+                .as_array()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid API response: 'users' field is missing or not an array"))?
+                .iter()
+                .filter_map(|user| user["login"].as_str().map(String::from))
+                .collect();
+
+            Ok((true, version_exists, owners))
         }
+        404 => Ok((false, false, Vec::new())),
         403 => Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Access forbidden. This could be due to IP-based rate limiting or other restrictions by crates.io.",
         )),
-        404 => Ok((false, false)),
         429 => Err(io::Error::new(io::ErrorKind::Other, "Rate limit exceeded for crates.io API. Please try again later.")),
         status => Err(io::Error::new(io::ErrorKind::Other, format!("Unexpected response from crates.io API. Status code: {}", status))),
     }
@@ -103,17 +146,10 @@ fn get_package_info() -> io::Result<Package> {
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Publish cancelled: name, version, or edition do not exist in Cargo.toml")),
     };
 
-    let (name_exists, version_exists) = match check_crate_exists(name, version) {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("Warning: Failed to check if crate exists: {}", e);
-            if e.kind() == io::ErrorKind::PermissionDenied {
-                eprintln!("This may be due to API restrictions. Proceeding assuming the crate doesn't exist.");
-            }
-            (false, false)
-        }
-    };
+    let current_username = get_or_prompt_username()?;
+    let (crate_exists, version_exists, owners) = check_crate_exists(name, version)?;
 
+    let name_exists = crate_exists && !owners.contains(&current_username);
     let name = if name_exists { format!("{name} {INVALID}") } else { format!("{name} {VALID}") }.into();
     let version = if version_exists { format!("{version} {INVALID}") } else { format!("{version} {VALID}") }.into();
 
@@ -155,22 +191,24 @@ fn run(cli: Cli) -> io::Result<()> {
 
     let mut missing_fields = Vec::new();
 
-    if let Some(description) = pkg.description {
-        println!(" {}: {}", "Description".bright_magenta(), description);
-    } else {
-        missing_fields.push("description");
-    }
-
     if let Some(license) = pkg.license {
         println!(" {}: {}", "License".bright_magenta(), license);
     } else {
         missing_fields.push("license");
     }
 
+    println!("\n{}", " Metadata:".magenta().bold());
+
     if let Some(repository) = pkg.repository {
-        println!(" {}: {}", "Repository".bright_magenta(), repository);
+        println!("  {}: {}", "Repository".bright_magenta(), repository);
     } else {
         missing_fields.push("repository");
+    }
+
+    if let Some(description) = pkg.description {
+        println!("  {}: {}", "Description".bright_magenta(), description);
+    } else {
+        missing_fields.push("description");
     }
 
     if !missing_fields.is_empty() {
