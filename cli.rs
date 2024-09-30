@@ -240,7 +240,7 @@ fn run(args: Vec<String>) -> io::Result<()> {
         println!("\n{} {}", "Package is missing:".bright_yellow(), missing_fields.join(", ").bright_yellow());
     }
 
-    let mut git_status = get_git_status()?;
+    let git_status = get_git_status()?;
 
     if git_status.is_empty() {
         println!("\n{}", "No uncommitted git changes".bright_green().bold());
@@ -276,16 +276,13 @@ fn run(args: Vec<String>) -> io::Result<()> {
                 "Bumping version from".bright_blue(),
                 current_version.bright_yellow(),
                 "to".bright_blue(),
-                new_version.bright_green()
+                new_version.bright_cyan()
             );
 
             update_version(&new_version)?;
             println!("{}", "Updated Cargo.toml with new version".green());
 
             pkg.version = new_version.green();
-
-            full_command.push("--allow-dirty".to_string());
-            git_status = String::default();
         } else {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Publish cancelled."));
         }
@@ -293,9 +290,6 @@ fn run(args: Vec<String>) -> io::Result<()> {
 
     if pkg.name_exists {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "\nPublish cancelled: name already exists"));
-    } else if !git_status.is_empty() {
-        print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
-        full_command.push("--allow-dirty".to_string());
     } else if !git_status.is_empty() {
         print!("\n{} {}{} ", "Are you sure you want to publish with dirty directory?".bright_blue().bold(), "(y/n)".bright_cyan(), ":");
         full_command.push("--allow-dirty".to_string());
