@@ -317,7 +317,9 @@ fn run(args: Vec<String>) -> io::Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 2 && args[1] == "validate" {
+    println!("args = {:?}, len = {}", args, args.len());
+
+    if args.len() >= 2 && args[1] == "validate" {
         let publish_args = args[2..].to_vec();
         if let Err(err) = run(publish_args) {
             eprintln!("{}", err.to_string().red().bold());

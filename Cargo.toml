@@ -1,10 +1,13 @@
 [package]
 name = "cargo-validate"
-version = "0.1.5"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 repository = "http://github.com/themackabu/cargo-validate"
+
 description = "verify everything is correct about your package before publishing"
+categories = ["development-tools::cargo-plugins"]
+keywords = ["cargo", "validation", "publishing", "package"]
 
 [[bin]]
 name = "cargo-validate"
